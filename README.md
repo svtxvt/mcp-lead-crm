@@ -22,7 +22,7 @@ Every tool call in the clip is real output from this server on the seeded demo d
 Requires Node.js 20 or newer.
 
 ```bash
-git clone https://github.com/jspython/mcp-lead-crm.git
+git clone https://github.com/svtxvt/mcp-lead-crm.git
 cd mcp-lead-crm
 npm i
 npm run build
