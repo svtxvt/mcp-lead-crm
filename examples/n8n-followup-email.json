@@ -1,0 +1,149 @@
+{
+  "name": "MCP Lead CRM - Follow-up Email Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mcp-lead-crm-followup",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "413bc179-b6f2-4aa0-a0cd-b5fd59421970",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "31e77196-533e-4b25-9495-cf3b0550a55c"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "272ea36d-76c0-42a6-af10-a137476d782c",
+              "leftValue": "={{ $json.body.event }}",
+              "rightValue": "followup_email",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7ab56c2b-24a5-4236-b18d-4bc7a867d44a",
+      "name": "Is follow-up email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "70a56860-f3d7-4d2e-8f62-c753a2f9e680",
+              "name": "event",
+              "value": "={{ $json.body.event }}",
+              "type": "string"
+            },
+            {
+              "id": "c2b33c43-6398-4e59-8c37-ad5aec7bb8e6",
+              "name": "lead_id",
+              "value": "={{ $json.body.lead_id }}",
+              "type": "string"
+            },
+            {
+              "id": "22e10d4c-cced-423d-bf71-2a4a423774bb",
+              "name": "payload",
+              "value": "={{ $json.body.payload }}",
+              "type": "object"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ef298cd7-aa4b-47b7-b267-d36e578237e3",
+      "name": "Prepare email payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        -80
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5dac0927-3503-443a-a629-2cabf9ea23d0",
+      "name": "Email placeholder (disabled)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        680,
+        -80
+      ],
+      "disabled": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Is follow-up email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is follow-up email?": {
+      "main": [
+        [
+          {
+            "node": "Prepare email payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Prepare email payload": {
+      "main": [
+        [
+          {
+            "node": "Email placeholder (disabled)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "b7158df4-1236-4a1e-9278-ad03265535bf",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "mcpLeadCrmDemo",
+  "tags": []
+}
