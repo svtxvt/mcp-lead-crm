@@ -153,6 +153,15 @@ describe.sequential("stdio MCP server", () => {
     expect(lead.activities.at(-1).type).toBe("n8n:dry-run");
   });
 
+  test("trigger_n8n without lead_id previews a dry run without recording it", async () => {
+    const before = await readFile(join(root, "crm.json"), "utf8");
+    expect(JSON.parse(await call("trigger_n8n", { event: "custom" }))).toEqual({
+      dry_run: true,
+      request: { method: "POST", body: { event: "custom" } },
+    });
+    expect(await readFile(join(root, "crm.json"), "utf8")).toBe(before);
+  });
+
   test("serves pipeline and lead resources", async () => {
     const summary = await client.readResource({ uri: "crm://pipeline/summary" });
     expect(JSON.parse(resourceText(summary))).toMatchObject({ counts: { contacted: 1, proposal: 1 } });

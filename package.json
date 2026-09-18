@@ -1,6 +1,6 @@
 {
   "name": "mcp-lead-crm",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A local MCP lead CRM with JSON/CSV storage and optional n8n webhooks.",
   "type": "module",
   "bin": {
@@ -18,10 +18,11 @@
     "build": "node --eval \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "dev": "tsx src/index.ts",
     "seed": "tsx src/seed.ts",
-    "test": "npm run build && vitest run"
+    "test": "npm run build && vitest run",
+    "prepack": "npm run build"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19"
   },
   "author": "Sergey Yashchuk",
   "license": "MIT",

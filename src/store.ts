@@ -1,5 +1,7 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { lstat, mkdir, open, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import * as z from "zod/v4";
 
@@ -77,6 +79,7 @@ export interface Store {
   exportCsv(path: string): Promise<number>;
   summary(): Promise<PipelineSummary>;
   replace(leads: Lead[]): Promise<void>;
+  drain(): Promise<void>;
 }
 
 const ActivitySchema = z.object({
@@ -220,49 +223,159 @@ function toCsv(leads: Lead[]): string {
   return `${lines.join("\n")}\n`;
 }
 
+function sameFile(a: Stats, b: Stats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+async function fileStat(path: string): Promise<Stats | undefined> {
+  try {
+    return await stat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function isInside(base: string, path: string): boolean {
+  const escape = relative(base, path);
+  return escape !== ".." && !escape.startsWith(`..${sep}`) && !isAbsolute(escape);
+}
+
+async function atomicWrite(path: string, content: string, beforeRename?: () => Promise<void>): Promise<void> {
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tempPath, content, { encoding: "utf8", flag: "wx" });
+    await beforeRename?.();
+    await rename(tempPath, path);
+  } finally {
+    await unlink(tempPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
+}
+
 export class JsonStore implements Store {
   private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(readonly path: string) {}
 
-  private async read(): Promise<Database> {
+  private async databasePath(): Promise<string> {
+    const path = resolve(this.path);
+    await mkdir(dirname(path), { recursive: true });
     try {
-      return DatabaseSchema.parse(JSON.parse(await readFile(this.path, "utf8")));
+      return await realpath(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return resolve(await realpath(dirname(path)), basename(path));
+    }
+  }
+
+  private async read(path = this.path): Promise<Database> {
+    try {
+      return DatabaseSchema.parse(JSON.parse(await readFile(path, "utf8")));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyDatabase();
-      throw new Error(`Cannot read CRM database ${this.path}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Cannot read CRM database ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  private async write(db: Database): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true });
-    const tempPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+  private async acquireLock(path: string): Promise<() => Promise<void>> {
+    const lockPath = `${path}.lock`;
+    const reapPath = `${lockPath}.reap`;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (!(await fileStat(reapPath))) {
+        try {
+          const handle = await open(lockPath, "wx", 0o600);
+          try {
+            await handle.writeFile(JSON.stringify({ pid: process.pid }));
+            const identity = await handle.stat();
+            const release = async () => {
+              await handle.close();
+              const current = await fileStat(lockPath);
+              if (current && sameFile(identity, current)) await unlink(lockPath);
+            };
+            if (!(await fileStat(reapPath))) return release;
+            await release();
+          } catch (error) {
+            await handle.close();
+            await unlink(lockPath).catch(() => undefined);
+            throw error;
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          await this.reapLock(lockPath, reapPath);
+        }
+      }
+      await delay(10 + Math.random() * 30);
+    }
+    throw new Error("Timed out waiting for CRM database lock");
+  }
+
+  private async reapLock(lockPath: string, reapPath: string): Promise<void> {
+    // ponytail: orphaned reclamation guards fail closed; remove them only with all servers stopped.
+    let guard;
     try {
-      const validated = DatabaseSchema.parse(db);
-      await writeFile(tempPath, `${JSON.stringify(validated, null, 2)}\n`, "utf8");
-      await rename(tempPath, this.path);
+      guard = await open(reapPath, "wx", 0o600);
     } catch (error) {
-      await unlink(tempPath).catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
       throw error;
     }
+    try {
+      await guard.writeFile(JSON.stringify({ pid: process.pid }));
+      let pid: unknown;
+      try {
+        pid = JSON.parse(await readFile(lockPath, "utf8"))?.pid;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return;
+        throw error;
+      }
+      if (!Number.isInteger(pid) || Number(pid) <= 0) return;
+      try {
+        process.kill(Number(pid), 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") return;
+        await unlink(lockPath);
+      }
+    } finally {
+      await guard.close();
+      await unlink(reapPath);
+    }
   }
 
-  // ponytail: one stdio server owns the file; add an OS lock if multiple processes must share it.
-  private async mutate<T>(change: (db: Database) => T | Promise<T>): Promise<T> {
-    let release!: () => void;
+  private async exclusive<T>(operation: (path: string) => Promise<T>): Promise<T> {
+    let releaseQueue!: () => void;
     const previous = this.writeQueue;
     this.writeQueue = new Promise<void>((resolve) => {
-      release = resolve;
+      releaseQueue = resolve;
     });
     await previous;
+    let releaseLock: (() => Promise<void>) | undefined;
     try {
-      const db = await this.read();
-      const result = await change(db);
-      await this.write(db);
-      return result;
+      const path = await this.databasePath();
+      releaseLock = await this.acquireLock(path);
+      return await operation(path);
     } finally {
-      release();
+      try {
+        await releaseLock?.();
+      } finally {
+        releaseQueue();
+      }
     }
+  }
+
+  private async mutate<T>(change: (db: Database, path: string) => T | Promise<T>): Promise<T> {
+    return this.exclusive(async (path) => {
+      const db = await this.read(path);
+      const result = await change(db, path);
+      const validated = DatabaseSchema.parse(db);
+      await atomicWrite(path, `${JSON.stringify(validated, null, 2)}\n`);
+      return result;
+    });
+  }
+
+  async drain(): Promise<void> {
+    await this.writeQueue;
   }
 
   private async snapshot(): Promise<Database> {
@@ -270,14 +383,51 @@ export class JsonStore implements Store {
     return this.read();
   }
 
-  private csvPath(path: string): string {
-    const base = dirname(resolve(this.path));
+  private async csvPath(path: string, databasePath: string, exporting = false): Promise<string> {
+    const base = dirname(databasePath);
     const candidate = resolve(base, path);
-    const escape = relative(base, candidate);
-    if (escape.startsWith("..") || isAbsolute(escape) || candidate === resolve(this.path)) {
-      throw new Error(`CSV path must stay inside ${base} and must not be the CRM database`);
+    const invalid = () => new Error("CSV path must stay inside the database directory and must not be the CRM database or its lock files");
+    let parent = dirname(candidate);
+    if (exporting) {
+      // Validate the nearest existing parent before creating nested export directories.
+      while (!(await fileStat(parent))) {
+        const next = dirname(parent);
+        if (next === parent) throw invalid();
+        parent = next;
+      }
+      if (!isInside(base, await realpath(parent))) throw invalid();
+      await mkdir(dirname(candidate), { recursive: true });
     }
-    return candidate;
+    parent = await realpath(dirname(candidate));
+    if (!isInside(base, parent)) throw invalid();
+    const canonical = resolve(parent, basename(candidate));
+    const reserved = [databasePath, `${databasePath}.lock`, `${databasePath}.lock.reap`];
+    // Reserve these names even before the database or reclamation guard exists.
+    if (reserved.some((path) => path.normalize("NFC").toLowerCase() === canonical.normalize("NFC").toLowerCase())) throw invalid();
+    // The active lock identifies native filename aliases even before the database exists.
+    const lockIdentity = await stat(`${databasePath}.lock`);
+    const lockAliases = [`${canonical}.lock`];
+    if (canonical.toLowerCase().endsWith(".reap")) lockAliases.push(canonical.slice(0, -5));
+    for (const alias of lockAliases) {
+      const aliasIdentity = await fileStat(alias);
+      if (aliasIdentity && sameFile(aliasIdentity, lockIdentity)) throw invalid();
+    }
+    let identity: Stats | undefined;
+    try {
+      const entry = await lstat(canonical);
+      if (exporting && entry.isSymbolicLink()) throw invalid();
+      if (!isInside(base, await realpath(canonical))) throw invalid();
+      identity = await stat(canonical);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (identity) {
+      for (const reservedPath of reserved) {
+        const reservedIdentity = await fileStat(reservedPath);
+        if (reservedIdentity && sameFile(identity, reservedIdentity)) throw invalid();
+      }
+    }
+    return canonical;
   }
 
   async addLead(input: AddLeadInput): Promise<Lead> {
@@ -366,14 +516,13 @@ export class JsonStore implements Store {
   }
 
   async importCsv(path: string): Promise<ImportResult> {
-    const rows = parseCsv(await readFile(this.csvPath(path), "utf8"));
-    const header = rows.shift();
-    if (!header || csvColumns.some((column) => !header.includes(column))) {
-      throw new Error(`CSV must include columns: ${csvColumns.join(",")}`);
-    }
-    const positions = Object.fromEntries(header.map((column, index) => [column, index])) as Record<string, number>;
-
-    return this.mutate((db) => {
+    return this.mutate(async (db, databasePath) => {
+      const rows = parseCsv(await readFile(await this.csvPath(path, databasePath), "utf8"));
+      const header = rows.shift();
+      if (!header || csvColumns.some((column) => !header.includes(column))) {
+        throw new Error(`CSV must include columns: ${csvColumns.join(",")}`);
+      }
+      const positions = Object.fromEntries(header.map((column, index) => [column, index])) as Record<string, number>;
       let created = 0;
       let updated = 0;
       for (const row of rows) {
@@ -412,11 +561,16 @@ export class JsonStore implements Store {
   }
 
   async exportCsv(path: string): Promise<number> {
-    const leads = (await this.snapshot()).leads;
-    const outputPath = this.csvPath(path);
-    await mkdir(dirname(outputPath), { recursive: true });
-    await writeFile(outputPath, toCsv(leads), "utf8");
-    return leads.length;
+    return this.exclusive(async (databasePath) => {
+      const leads = (await this.read(databasePath)).leads;
+      const outputPath = await this.csvPath(path, databasePath, true);
+      await atomicWrite(outputPath, toCsv(leads), async () => {
+        if (await this.csvPath(path, databasePath, true) !== outputPath) {
+          throw new Error("CSV destination changed during export");
+        }
+      });
+      return leads.length;
+    });
   }
 
   async summary(): Promise<PipelineSummary> {
