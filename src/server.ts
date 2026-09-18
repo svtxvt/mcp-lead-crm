@@ -1,4 +1,4 @@
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { ACTIVITY_TYPES, JsonStore, SOURCES, STAGES, type Lead, type Store } from "./store.js";
 
@@ -15,83 +15,83 @@ function pipelineTable(leads: Lead[]): string {
 }
 
 export function createServer(store: Store, webhookUrl = process.env.N8N_WEBHOOK_URL): McpServer {
-  const server = new McpServer({ name: "mcp-lead-crm", version: "0.1.0" });
+  const server = new McpServer({ name: "mcp-lead-crm", version: "0.2.0" });
 
   server.registerTool("add_lead", {
     description: "Add a new lead to the CRM pipeline.",
-    inputSchema: {
+    inputSchema: z.object({
       name: z.string().trim().min(1),
       email: z.email().optional(),
       phone: z.string().trim().min(1).optional(),
       company: z.string().trim().min(1).optional(),
       source: z.enum(SOURCES).optional(),
       notes: z.string().optional(),
-    },
+    }),
   }, async (input) => text(await store.addLead(input)));
 
   server.registerTool("qualify_lead", {
     description: "Score a lead and mark it qualified at 60 or above, otherwise unqualified.",
-    inputSchema: {
+    inputSchema: z.object({
       id: z.string().regex(/^L-\d{4,}$/),
       score: z.number().int().min(0).max(100),
       reason: z.string().trim().min(1),
-    },
+    }),
   }, async ({ id, score, reason }) => text(await store.qualifyLead(id, score, reason)));
 
   server.registerTool("move_stage", {
     description: "Move a lead to another pipeline stage.",
-    inputSchema: {
+    inputSchema: z.object({
       id: z.string().regex(/^L-\d{4,}$/),
       stage: z.enum(STAGES),
       note: z.string().optional(),
-    },
+    }),
   }, async ({ id, stage, note }) => text(await store.moveStage(id, stage, note)));
 
   server.registerTool("log_activity", {
     description: "Record a call, email, meeting, note, or follow-up task for a lead.",
-    inputSchema: {
+    inputSchema: z.object({
       id: z.string().regex(/^L-\d{4,}$/),
       type: z.enum(ACTIVITY_TYPES),
       note: z.string().trim().min(1),
       due_at: z.iso.datetime({ offset: true }).optional(),
-    },
+    }),
   }, async ({ id, type, note, due_at }) => text(await store.logActivity(id, type, note, due_at)));
 
   server.registerTool("list_pipeline", {
     description: "List a compact view of leads in the pipeline.",
-    inputSchema: {
+    inputSchema: z.object({
       stage: z.enum(STAGES).optional(),
       limit: z.number().int().min(1).max(100).default(20),
-    },
+    }),
   }, async ({ stage, limit }) => text(pipelineTable(await store.listLeads(stage, limit))));
 
   server.registerTool("due_followups", {
     description: "List follow-up tasks due by the end of the requested window, including overdue tasks.",
-    inputSchema: { days: z.number().int().min(0).max(3650).default(3) },
+    inputSchema: z.object({ days: z.number().int().min(0).max(3650).default(3) }),
   }, async ({ days }) => text(await store.dueFollowups(days)));
 
   server.registerTool("search_leads", {
     description: "Search lead names, emails, companies, and notes.",
-    inputSchema: { query: z.string().trim().min(1) },
+    inputSchema: z.object({ query: z.string().trim().min(1) }),
   }, async ({ query }) => text(await store.searchLeads(query)));
 
   server.registerTool("import_csv", {
     description: "Import or update leads from a CSV file inside the CRM database directory. The file must use all 11 export columns; blank optional cells clear values.",
-    inputSchema: { path: z.string().trim().min(1) },
+    inputSchema: z.object({ path: z.string().trim().min(1) }),
   }, async ({ path }) => text(await store.importCsv(path)));
 
   server.registerTool("export_csv", {
     description: "Export all leads to a CSV file inside the CRM database directory.",
-    inputSchema: { path: z.string().trim().min(1) },
+    inputSchema: z.object({ path: z.string().trim().min(1) }),
   }, async ({ path }) => text({ path, exported: await store.exportCsv(path) }));
 
   server.registerTool("trigger_n8n", {
     description: "Trigger an n8n webhook, or return a safe dry run when no webhook URL is configured.",
-    inputSchema: {
+    inputSchema: z.object({
       event: z.enum(["followup_email", "lead_qualified", "stage_changed", "custom"]),
       lead_id: z.string().regex(/^L-\d{4,}$/).optional(),
       payload: z.unknown().optional(),
-    },
+    }),
   }, async ({ event, lead_id, payload }) => {
     if (lead_id && !(await store.getLead(lead_id))) throw new Error(`Lead ${lead_id} not found`);
     const body = { event, ...(lead_id ? { lead_id } : {}), ...(payload !== undefined ? { payload } : {}) };

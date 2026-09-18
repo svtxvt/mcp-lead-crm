@@ -1,14 +1,20 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { Client } from "@modelcontextprotocol/client";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 let root: string;
 let client: Client;
 let transport: StdioClientTransport;
 let leadId = "";
+
+function resourceText(resource: Awaited<ReturnType<Client["readResource"]>>): string {
+  const value = (resource.contents[0] as { text?: unknown } | undefined)?.text;
+  if (typeof value !== "string") throw new Error("Expected text resource content");
+  return value;
+}
 
 function firstText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   const first = result.content[0];
@@ -97,7 +103,7 @@ describe.sequential("stdio MCP server", () => {
     }));
     expect(activity.due_at).toBe("2030-01-02T08:00:00.000Z");
     const resource = await client.readResource({ uri: `crm://lead/${leadId}` });
-    expect(JSON.parse(resource.contents[0]!.text!).id).toBe(leadId);
+    expect(JSON.parse(resourceText(resource)).id).toBe(leadId);
   });
 
   test("due_followups returns tasks in the window", async () => {
@@ -143,16 +149,16 @@ describe.sequential("stdio MCP server", () => {
       request: { method: "POST", body: { event: "followup_email", lead_id: leadId } },
     });
     const resource = await client.readResource({ uri: `crm://lead/${leadId}` });
-    const lead = JSON.parse(resource.contents[0]!.text!);
+    const lead = JSON.parse(resourceText(resource));
     expect(lead.activities.at(-1).type).toBe("n8n:dry-run");
   });
 
   test("serves pipeline and lead resources", async () => {
     const summary = await client.readResource({ uri: "crm://pipeline/summary" });
-    expect(JSON.parse(summary.contents[0]!.text!)).toMatchObject({ counts: { contacted: 1, proposal: 1 } });
+    expect(JSON.parse(resourceText(summary))).toMatchObject({ counts: { contacted: 1, proposal: 1 } });
 
     const lead = await client.readResource({ uri: `crm://lead/${leadId}` });
-    expect(JSON.parse(lead.contents[0]!.text!)).toMatchObject({ id: leadId, name: "Taylor Reed" });
+    expect(JSON.parse(resourceText(lead))).toMatchObject({ id: leadId, name: "Taylor Reed" });
   });
 
   test("renders daily_followup_briefing from live CRM data", async () => {

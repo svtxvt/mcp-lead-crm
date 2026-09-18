@@ -1,5 +1,7 @@
 # mcp-lead-crm
 
+[![CI](https://github.com/svtxvt/mcp-lead-crm/actions/workflows/ci.yml/badge.svg)](https://github.com/svtxvt/mcp-lead-crm/actions/workflows/ci.yml)
+
 A local, open-source MCP server that lets Claude manage a small-business lead pipeline and trigger n8n workflows.
 The demo runs without accounts, API keys, native modules, or hosted infrastructure.
 
@@ -63,6 +65,14 @@ CSV imports require the documented 11-column export header. Import is a full-row
 The server exposes tools to add, qualify, move, search, import, and export leads; log activities; list the pipeline and due follow-ups; and trigger n8n. It also serves `crm://pipeline/summary` and `crm://lead/{id}`, plus the `daily_followup_briefing` prompt.
 
 For a one-minute walkthrough, use [docs/demo-script.md](docs/demo-script.md); the GIF above follows the same steps.
+
+## Protocol support
+
+Built on the MCP TypeScript SDK v2 (`@modelcontextprotocol/server` 2.x). The stdio entry point uses `serveStdio`, so one process serves both protocol eras: the **2026-07-28** revision (stateless, `server/discover`, no `initialize` handshake) and **2025-era clients** that still open with the `initialize` handshake. A v2 client opts into the newer revision with `versionNegotiation: { mode: "auto" }` or pins it with `{ mode: { pin: "2026-07-28" } }`; both paths are covered by `tests/protocol.test.ts`.
+
+## Tests
+
+`npm test` builds the server and runs 24 tests in 6 files: the store (concurrent writes, CSV round trips, rejected out-of-directory paths), the seed script, the shipped n8n workflow, the full tool/resource/prompt surface over a real stdio connection, the live webhook branch against a local HTTP receiver, and protocol-era negotiation. The same suite runs in GitHub Actions on Node.js 20 and 22.
 
 ## n8n example
 

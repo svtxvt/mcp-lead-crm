@@ -2,8 +2,8 @@ import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { Client } from "@modelcontextprotocol/client";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 let root: string;
@@ -21,6 +21,12 @@ const httpServer = createServer((request, response) => {
     response.end(status === 200 ? "accepted" : "unavailable");
   });
 });
+
+function resourceText(resource: Awaited<ReturnType<Client["readResource"]>>): string {
+  const value = (resource.contents[0] as { text?: unknown } | undefined)?.text;
+  if (typeof value !== "string") throw new Error("Expected text resource content");
+  return value;
+}
 
 function firstText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   const content = result.content[0];
@@ -67,7 +73,7 @@ describe.sequential("live n8n webhook branch", () => {
     expect(received).toEqual({ event: "lead_qualified", lead_id: "L-0001", payload: { score: 88 } });
 
     const resource = await client.readResource({ uri: "crm://lead/L-0001" });
-    expect(JSON.parse(resource.contents[0]!.text!).activities.at(-1).type).toBe("n8n:trigger");
+    expect(JSON.parse(resourceText(resource)).activities.at(-1).type).toBe("n8n:trigger");
   });
 
   test("returns a clear tool error for a non-2xx webhook", async () => {
